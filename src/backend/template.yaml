@@ -1,0 +1,286 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  AWS POC Event Photo Manager
+
+# More info about Globals: https://github.com/awslabs/serverless-application-model/blob/master/docs/globals.rst
+Globals:
+  Function:
+    Timeout: 3
+  Api:
+    Cors:
+      AllowHeaders: "'*'"
+      AllowOrigin: "'*'"
+
+Resources:
+  SrcBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      CorsConfiguration:
+        CorsRules:
+          - AllowedMethods:
+              - HEAD
+              - GET
+              - PUT
+              - POST
+              - DELETE
+            AllowedOrigins:
+              - '*'
+            AllowedHeaders:
+              - '*'
+      BucketName: !Sub '${AWS::StackName}-${AWS::Region}-${AWS::AccountId}-assets'
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub '${AWS::StackName}-user-pool'
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: !Sub '${AWS::StackName}-client'
+      GenerateSecret: false
+      UserPoolId: !Ref UserPool
+  IdentityPool:
+    Type: AWS::Cognito::IdentityPool
+    Properties:
+      AllowUnauthenticatedIdentities: true
+      CognitoIdentityProviders:
+        - ClientId: !Ref UserPoolClient
+          ProviderName: !GetAtt UserPool.ProviderName
+  CognitoUnauthorizedRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Principal:
+              Federated: 'cognito-identity.amazonaws.com'
+            Action:
+              - 'sts:AssumeRoleWithWebIdentity'
+            Condition:
+              StringEquals:
+                'cognito-identity.amazonaws.com:aud': !Ref IdentityPool
+              'ForAnyValue:StringLike':
+                'cognito-identity.amazonaws.com:amr': unauthenticated
+      Policies:
+        - PolicyName: !Sub '${AWS::StackName}-unathorized-policy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - rekognition:SearchFacesByImage
+                Resource:
+                  - !Sub 'arn:aws:rekognition:${AWS::Region}:${AWS::AccountId}:collection/photo-manager'
+              - Effect: 'Allow'
+                Action:
+                  - s3:PutObject*
+                  - s3:GetObject*
+                Resource:
+                  - !Sub 'arn:aws:s3:::${AWS::StackName}-${AWS::Region}-${AWS::AccountId}-assets'
+                  - !Sub 'arn:aws:s3:::${AWS::StackName}-${AWS::Region}-${AWS::AccountId}-assets/*'
+  CognitoAuthorizedRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Principal:
+              Federated: 'cognito-identity.amazonaws.com'
+            Action:
+              - 'sts:AssumeRoleWithWebIdentity'
+            Condition:
+              StringEquals:
+                'cognito-identity.amazonaws.com:aud': !Ref IdentityPool
+              'ForAnyValue:StringLike':
+                'cognito-identity.amazonaws.com:amr': authenticated
+      Policies:
+        - PolicyName: 'CognitoAuthorizedPolicy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: 'Allow'
+                Action:
+                  - 'mobileanalytics:PutEvents'
+                  - 'cognito-sync:*'
+                  - 'cognito-identity:*'
+                Resource: '*'
+              - Effect: 'Allow'
+                Action:
+                  - 'lambda:InvokeFunction'
+                Resource: '*'
+  IdentityPoolRoleMapping:
+    Type: AWS::Cognito::IdentityPoolRoleAttachment
+    Properties:
+      IdentityPoolId: !Ref IdentityPool
+      Roles:
+        authenticated: !GetAtt CognitoAuthorizedRole.Arn
+        unauthenticated: !GetAtt CognitoUnauthorizedRole.Arn
+  PhotosTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: photos
+      BillingMode: PAY_PER_REQUEST
+      Tags:
+        - Key: project
+          Value: aws-event-photo-manager
+      AttributeDefinitions:
+        - AttributeName: personId
+          AttributeType: S
+        - AttributeName: photoPath
+          AttributeType: S
+      KeySchema:
+        - AttributeName: personId
+          KeyType: HASH
+        - AttributeName: photoPath
+          KeyType: RANGE
+  UploadPhoto:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: functions/
+      Handler: app.uploadPhoto
+      Runtime: nodejs10.x
+      MemorySize: 512
+      Timeout: 120
+      Policies:
+        - S3CrudPolicy:
+            BucketName: !Ref SrcBucket
+      Environment:
+        Variables:
+          S3BUCKET: !Ref SrcBucket
+      Events:
+        PostPhoto:
+          Type: Api
+          Properties:
+            Path: /photos
+            Method: post
+  GetFaceID:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: functions/
+      Handler: app.getFaceId
+      Runtime: nodejs10.x
+      MemorySize: 512
+      Timeout: 120
+      Policies:
+        - RekognitionWriteOnlyAccessPolicy:
+            CollectionId: photo-manager
+      Environment:
+        Variables:
+          REKOGNITION_COLLECTION: photo-manager
+      Events:
+        PostPhoto:
+          Type: Api
+          Properties:
+            Path: /users/faceId
+            Method: post
+  ProcessPhoto:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: functions/
+      Handler: app.processPhotos
+      Runtime: nodejs10.x
+      MemorySize: 512
+      Timeout: 120
+      Environment:
+        Variables:
+          PHOTOS_TABLE: !Ref PhotosTable
+          REKOGNITION_COLLECTION: photo-manager
+          S3_BUCKET: !Sub '${AWS::StackName}-${AWS::Region}-${AWS::AccountId}-assets'
+      Policies:
+        - RekognitionWriteOnlyAccessPolicy:
+            CollectionId: photo-manager
+        - DynamoDBCrudPolicy:
+            TableName: !Ref PhotosTable
+        - Version: 2012-10-17
+          Statement:
+            - Effect: Allow
+              Action: s3:GetObject*
+              Resource: !Sub 'arn:aws:s3:::${AWS::StackName}-${AWS::Region}-${AWS::AccountId}-assets'
+            - Effect: Allow
+              Action: s3:GetObject*
+              Resource: !Sub 'arn:aws:s3:::${AWS::StackName}-${AWS::Region}-${AWS::AccountId}-assets/*'
+      Events:
+        ProcessPhotoEvent:
+          Type: S3
+          Properties:
+            Bucket: !Ref SrcBucket
+            Events: s3:ObjectCreated:*
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: prefix
+                    Value: public/
+  FindFaces:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: functions/
+      Handler: app.findFaceFromImage
+      Runtime: nodejs10.x
+      MemorySize: 512
+      Timeout: 120
+      Environment:
+        Variables:
+          S3_BUCKET: !Ref SrcBucket
+          REKOGNITION_COLLECTION: photo-manager
+      Policies:
+        - S3ReadPolicy:
+            BucketName: !Sub '${AWS::StackName}-${AWS::Region}-${AWS::AccountId}-assets'
+        - RekognitionReadPolicy:
+            CollectionId: photo-manager
+      Events:
+        PostPhoto:
+          Type: Api
+          Properties:
+            Path: /users/search
+            Method: post
+  GetPhotos:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: functions/
+      Handler: app.getPhotos
+      Runtime: nodejs10.x
+      MemorySize: 512
+      Timeout: 120
+      Environment:
+        Variables:
+          S3_BUCKET: !Ref SrcBucket
+          PHOTOS_TABLE: !Ref PhotosTable
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref PhotosTable
+        - Version: 2012-10-17
+          Statement:
+            - Effect: Allow
+              Action: s3:GetObject*
+              Resource: !Sub 'arn:aws:s3:::${AWS::StackName}-${AWS::Region}-${AWS::AccountId}-assets'
+            - Effect: Allow
+              Action: s3:GetObject*
+              Resource: !Sub 'arn:aws:s3:::${AWS::StackName}-${AWS::Region}-${AWS::AccountId}-assets/*'
+      Events:
+        PostPhoto:
+          Type: Api
+          Properties:
+            Path: /users/{userId}/photos
+            Method: get
+
+Outputs:
+  # ServerlessRestApi is an implicit API created out of Events key under Serverless::Function
+  # Find out more about other implicit resources you can reference within SAM
+  # https://github.com/awslabs/serverless-application-model/blob/master/docs/internals/generated_resources.rst#api
+  APIEndpoint:
+    Description: 'API Gateway endpoint URL for Prod stage'
+    Value: !Sub 'https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/'
+  UserPoolId:
+    Value: !Ref UserPool
+    Export:
+      Name: 'UserPool::Id'
+  UserPoolClientId:
+    Value: !Ref UserPoolClient
+    Export:
+      Name: 'UserPoolClient::Id'
+  IdentityPoolId:
+    Value: !Ref IdentityPool
+    Export:
+      Name: 'IdentityPool::Id'

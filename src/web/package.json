@@ -1,0 +1,47 @@
+{
+  "name": "web",
+  "version": "0.1.0",
+  "private": true,
+  "dependencies": {
+    "@material-ui/core": "^4.4.3",
+    "@material-ui/icons": "^4.4.3",
+    "@material-ui/styles": "4.4.3",
+    "@types/jest": "24.0.18",
+    "@types/node": "12.7.5",
+    "@types/react": "16.9.2",
+    "@types/react-dom": "16.9.0",
+    "aws-amplify": "^1.1.40",
+    "mime-types": "2.1.24",
+    "react": "^16.9.0",
+    "react-cookie": "^4.0.1",
+    "react-dom": "^16.9.0",
+    "react-dropzone": "10.1.9",
+    "react-photo-gallery": "^8.0.0",
+    "react-router-dom": "^5.0.1",
+    "react-scripts": "3.1.2",
+    "styled-components": "4.4.0",
+    "typescript": "3.6.3",
+    "uuid": "3.3.3"
+  },
+  "scripts": {
+    "start": "react-scripts start",
+    "build": "react-scripts build",
+    "test": "react-scripts test",
+    "eject": "react-scripts eject"
+  },
+  "eslintConfig": {
+    "extends": "react-app"
+  },
+  "browserslist": {
+    "production": [
+      ">0.2%",
+      "not dead",
+      "not op_mini all"
+    ],
+    "development": [
+      "last 1 chrome version",
+      "last 1 firefox version",
+      "last 1 safari version"
+    ]
+  }
+}
